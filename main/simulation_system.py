@@ -1,11 +1,8 @@
 import enum
-import random
+from typing import List, Dict, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
-
-from typing import List, Dict, Optional, Callable, Tuple
-
-import main
 
 
 class CustomerPosition(enum.Enum):
@@ -34,11 +31,11 @@ class Customer:
         self.patience_time = -1
         self.request_part = int(self.random_gen.get_randint(1, 1 + parts_count))
 
-        self.arrival_time = 0
-        self.reception_start_time = 0
-        self.reception_end_time = 0
-        self.cook_start_time = 0
-        self.cook_end_time = 0
+        self.arrival_time = np.inf
+        self.reception_start_time = np.inf
+        self.reception_end_time = np.inf
+        self.cook_start_time = np.inf
+        self.cook_end_time = np.inf
 
         self.position: Tuple[int, CustomerPosition] = (-1, CustomerPosition.NotArrived)  # (Queue Number, State)
 
@@ -68,6 +65,8 @@ class Server:
                 first_item = self.queues[i].pop(0)
                 if first_item.position[1] != CustomerPosition.Canceled and first_item.patience_time > self.get_time():
                     return first_item
+                else:
+                    self.simulation_system.tired_in_queues[first_item.position[0]] -= 1
         return None
 
     def start_serving(self):
@@ -104,9 +103,17 @@ class Server:
                 self.worker_working_on[i] = None
                 self.worker_next_event_time[i] = (np.inf, np.inf)
             elif self.worker_next_event_time[i][1] == now_time:
+                customer = self.worker_working_on[i]
+                self.simulation_system.tired_in_queues[customer.position[0]] -= 1
                 self.worker_working_on[i] = None
                 self.worker_next_event_time[i] = (np.inf, np.inf)
         self.start_serving()
+
+    def get_queue_length(self):
+        length = 0
+        for queue in self.queues.values():
+            length += len(queue)
+        return length
 
     def nearest_event(self):
         return min(self.worker_next_event_time, key=lambda x: x[0])[0]
@@ -136,7 +143,7 @@ class Simulation:
 
         self.servers: List[Server] = []
 
-        self.last_cid = 0
+        self.last_cid = -1
         self.entered_customers = 0
         self.canceled_customers = 0
         self.exited_customers = 0
@@ -148,14 +155,22 @@ class Simulation:
         self.all_customers: Dict[int, Customer] = {}
         self.patience_times: List[Tuple[int, int]] = []  # [(time, id), ...]
 
+        self.total_system_times: np.ndarray = np.empty((self.population, 2), dtype=np.int64)
+        self.total_queue_times: np.ndarray = np.empty((self.population, 2), dtype=np.int64)
+        self.queue_length_in_times: List[List[Tuple[int, int]]] = []  # [ [(time, length), ...] , ... ]
+        self.queue_length_in_periods: List[List[Tuple[int, int]]] = []  # [ [(period, length), ...] , ... ]
+        self.tired_in_queues: np.ndarray = np.array([])
+
+        self.presents_in_system: List[Tuple[int, int]] = []  # [(time, number), ...]
+
     def initialize(self):
-        line = "1, 0.0333, 0.05, 0.025"  # input("ENTER 𝑁, 𝜆, 𝜇, a : ")
+        line = input("ENTER 𝑁, 𝜆, 𝜇, a : ")
         self.parts_count = int(line.split(",")[0].strip())
         self.arrival_rate = float(line.split(",")[1].strip())
         self.reception_rate = float(line.split(",")[2].strip())
         self.alpha_rate = float(line.split(",")[3].strip())
         for i in range(self.parts_count):
-            line = "0.1,0.1"  # input(f"ENTER cook rates for part {i + 1} : ")
+            line = input(f"ENTER cook rates for part {i + 1} : ")
             self.cook_rates.append(list(map(lambda x: float(x.strip()), line.split(","))))
 
         for i in range(self.parts_count + 1):
@@ -164,6 +179,12 @@ class Simulation:
             else:
                 server_item = Server(False, 4, self.cook_rates[i - 1], self)
             self.servers.append(server_item)
+
+        for i in range(self.parts_count + 1):
+            self.queue_length_in_times.append([])
+            self.queue_length_in_periods.append([])
+        self.tired_in_queues = np.empty(len(self.servers), dtype=np.int64)
+        self.tired_in_queues.fill(0)
 
     def customer_work_finished(self, customer: Customer):
         if customer.position[0] == 0:
@@ -194,9 +215,12 @@ class Simulation:
                 continue
             customer.position = (customer.position[0], CustomerPosition.Canceled)
             self.canceled_customers += 1
+            self.tired_in_queues[customer.position[0]] += 1
             self.patience_times.pop(0)
 
     def start_simulation(self):
+        last_time = 0
+        print(f'Simulation Start for population {self.population}')
         while not self.is_simulation_finished():
             assert self.now_time != np.inf
             if self.now_time == self.next_arrival_time:
@@ -222,6 +246,15 @@ class Simulation:
 
             self.handle_tiring()
 
+            for i, server in enumerate(self.servers):
+                self.queue_length_in_times[i].append(
+                    (self.now_time, server.get_queue_length() - self.tired_in_queues[i]))
+
+            self.presents_in_system.append(
+                (self.now_time, self.entered_customers - self.exited_customers - self.canceled_customers))
+
+            last_time = self.now_time
+
             next_time = self.next_arrival_time
             if len(self.patience_times) > 0:
                 next_time = min(next_time, self.patience_times[0][0])
@@ -229,6 +262,113 @@ class Simulation:
                 next_time = min(next_time, server.nearest_event())
 
             self.now_time = next_time
+
+        self.now_time = last_time
+
+    def analyze_result(self):
+        assert self.entered_customers == self.exited_customers + self.canceled_customers
+        assert self.population == len(self.all_customers)
+
+        for i in self.all_customers:
+            customer = self.all_customers[i]
+            if customer.position[1] == CustomerPosition.Exited:
+                system_time = customer.cook_end_time - customer.arrival_time
+                queue_time = (customer.reception_start_time - customer.arrival_time) + (customer.cook_start_time
+                                                                                        - customer.reception_end_time)
+            elif customer.position[1] == CustomerPosition.Canceled:
+                system_time = customer.patience_time - customer.arrival_time
+                if customer.reception_start_time == np.inf:
+                    queue_time = system_time
+                elif customer.reception_end_time == np.inf:
+                    queue_time = customer.reception_start_time - customer.arrival_time
+                elif customer.cook_start_time == np.inf:
+                    queue_time = system_time - (customer.reception_end_time - customer.reception_start_time)
+                else:
+                    queue_time = (customer.reception_start_time - customer.arrival_time) + (customer.cook_start_time -
+                                                                                            customer.reception_end_time)
+            else:
+                raise Exception("Cannot analyze result before ending simulation!")
+            self.total_system_times[i][0] = system_time
+            self.total_system_times[i][1] = customer.priority
+            self.total_queue_times[i][0] = queue_time
+            self.total_queue_times[i][1] = customer.priority
+
+        for i in range(len(self.servers)):
+            for j in range(len(self.queue_length_in_times[i]) - 1):
+                item = self.queue_length_in_times[i][j]
+                item2 = self.queue_length_in_times[i][j + 1]
+                self.queue_length_in_periods[i].append((item2[0] - item[0], item[1]))
+
+        print(f"\nTotal time spent in seconds = {self.now_time}")
+        print("#" * 30)
+        priority_filters = [np.array([i]) for i in range(0, 5)]
+        print(f"Average time spent in system for TOTAL priority = {np.mean(self.total_system_times[:, 0])}")
+        for i in range(0, 5):
+            to_mean = self.total_system_times[np.in1d(self.total_system_times[:, 1], priority_filters[i])][:, 0]
+            if len(to_mean) > 0:
+                print(f"Average time spent in system for priority {i} = {np.mean(to_mean)}")
+
+        print("#" * 30)
+        print(f"Average time spent in queue for TOTAL priority = {np.mean(self.total_queue_times[:, 0])}")
+        for i in range(0, 5):
+            to_mean = self.total_queue_times[np.in1d(self.total_queue_times[:, 1], priority_filters[i])][:, 0]
+            if len(to_mean) > 0:
+                print(f"Average time spent in queue for priority {i} = {np.mean(to_mean)}")
+
+        print("#" * 30)
+        print(f"Number of canceled customers = {self.canceled_customers}")
+
+        print("#" * 30)
+        for i in range(len(self.servers)):
+            length = np.array(self.queue_length_in_periods[i])
+            name = "Reception" if i == 0 else f"Part {i}"
+            print(f"Average queue length in {name} queue = {np.average(length[:, 1], weights=length[:, 0])}")
+
+        self.draw_plots()
+
+    def draw_plots(self):
+        rows = max(5, len(self.servers) + 1)
+        figure, axis = plt.subplots(rows, 2, figsize=(20, 10 * rows))
+        step = int(self.now_time / 100)
+        for i in range(len(self.servers)):
+            name = "Reception" if i == 0 else f"Part {i}"
+            length = np.array(self.queue_length_in_times[i])
+            periods = np.array(self.queue_length_in_periods[i])
+            X = []
+            Y = []
+            last_ploted = 0
+            for j in range(len(length)):
+                if j >= len(periods):
+                    break
+                if length[j][0] - length[last_ploted][0] >= step:
+                    X.append(length[last_ploted][0])
+                    Y.append(np.average(periods[last_ploted:j, 1], weights=periods[last_ploted:j, 0]))
+                    last_ploted = j
+            axis[i, 0].plot(X, Y)
+            axis[i, 0].set_title(f"Queue length for -> {name}")
+
+        index = len(self.servers)
+        present = np.array(self.presents_in_system)
+        X = []
+        Y = []
+        last_ploted = 0
+        for j in range(len(present)):
+            if present[j][0] - present[last_ploted][0] >= step:
+                X.append(present[last_ploted][0])
+                Y.append(np.sum(present[last_ploted:j, 1]) / (present[j][0] - present[last_ploted][0]))
+                last_ploted = j
+
+        axis[index, 0].plot(X, Y)
+        axis[index, 0].set_title(f"Number of presents in system")
+
+        priority_filters = [np.array([i]) for i in range(0, 5)]
+        for i in range(0, 5):
+            to_mean = self.total_queue_times[np.in1d(self.total_queue_times[:, 1], priority_filters[i])][:, 0]
+            if len(to_mean) > 0:
+                axis[i, 1].hist(to_mean, rwidth=0.8)
+                axis[i, 1].set_title(f"Histogram for waiting time for priority {i}")
+
+        plt.show()
 
 
 class RandomGen:

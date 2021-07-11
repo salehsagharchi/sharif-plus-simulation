@@ -4,7 +4,7 @@ from datetime import datetime
 
 import simulation_system
 
-random_filename = "RandomObjects/2021_07_09_03_10_0xx8.obj"
+random_filename = ""
 
 
 def load_random_gen():
@@ -23,10 +23,15 @@ def save_random_gen(to_save):
 def start_simulation():
     random_gen = load_random_gen()
     try:
-        simulation_sytem = simulation_system.Simulation(1000000, random_gen)
+        population = 1000000
+        pop_str = input("Enter population : ")
+        if pop_str != "":
+            population = int(pop_str)
+        simulation_sytem = simulation_system.Simulation(population, random_gen)
         simulation_sytem.initialize()
         simulation_sytem.start_simulation()
         print("Simulation Finished")
+        simulation_sytem.analyze_result()
     finally:
         if random_gen:
             random_gen.old_random_list = random_gen.new_random_list
